@@ -1,0 +1,39 @@
+# Configuration for a package tracker demonstration (generic UDP client).
+# All values can be overridden by command line parameters
+
+# Server in the format host:port
+#server: udp-us.tartabit.com:9110
+server: udp-eu.tartabit.com:9110
+
+# Customer code (even-length hex string)
+code: "11223344"
+
+# Provide identifiers normally read from modem via AT on devices
+imei: 958419511056393
+iccid: 8901000000000000000
+
+location:
+  # simulated, cellid
+  type: cellid
+  #type: simulated
+  #lat: 45.448803450183924
+  #lon: -75.63533774831912
+
+# Reporting interval in seconds
+interval: 3600
+
+# Reading interval in seconds (sensor sampling)
+readings: 1800
+
+# Motion event settings (if either is missing, motion events are disabled)
+#motionDuration: 120   # seconds between motion start and motion stop
+#motionInterval: 600   # seconds from motion end to next motion start
+
+# Simulated update settings
+updateDuration: 5         # seconds to simulate update duration
+updateFailureRate: 0.1    # 0.0..1.0 probability of failure
+
+# Network info typically retrieved from modem
+mcc: "001"
+mnc: "01"
+rat: "LTE-M"
