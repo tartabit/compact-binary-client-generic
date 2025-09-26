@@ -2,12 +2,12 @@
 Generic UDP client using compact-binary-protocol over raw UDP sockets.
 
 Features (mirrors zencross client, without AT commands):
-- Sends Power On (P+) on startup using values from YAML/CLI (IMEI, code, mcc/mnc/rat, software/modem versions)
-- Sends Configuration (C) after P+
+- Sends startup Telemetry (T) on first connect including CustomerId, Versions, NetworkInfo
+- Sends Configuration (C) after startup telemetry
 - Periodically sends Telemetry (T) with simulated sensors and location
-- Optional Motion events (M+/M-) if configured
-- Handles inbound server commands on UDP socket: C (request), W (write), U+ (update request)
-- Simulated update handling: sends U- "started" then final "success"/"failed" per YAML updateDuration/updateFailureRate
+- Motion events via Telemetry event field if configured
+- Handles inbound server commands on UDP socket: C (request), W (write)
+- Update packets removed from protocol; no simulated update handling
 
 Configuration precedence: CLI > YAML > defaults.
 Two sample YAMLs are available in sample_configs/.
@@ -24,18 +24,17 @@ from threading import Thread, Event, Lock
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'compact-binary-protocol'))
 
 from compact_binary_protocol import (
-    LocationData,
-    SensorDataBasic,
-    SensorDataNull,
-    SensorDataMulti,
-    SensorDataSteps,
+    DataLocation,
+    DataBasic,
+    DataNull,
+    DataMulti,
+    DataSteps,
+    DataVersions,
+    DataNetworkInfo,
+    DataCustomerId,
     TelemetryPacket,
-    PowerOnPacket,
     ConfigPacket,
-    MotionStartPacket,
-    MotionStopPacket,
-    UpdateRequestPacket,
-    UpdateStatusPacket,
+    DataKv,
     PacketDecoder,
     DataReader,
 )
@@ -71,8 +70,6 @@ def sim_steps(duration: int) -> int:
     steps = int(rate * max(1, duration)) + random.randint(-5, 5)
     return max(0, steps)
 
-# ----- UDP helpers -----
-
 def parse_server(addr: str):
     if not addr or ':' not in addr:
         raise ValueError('server must be host:port')
@@ -105,37 +102,9 @@ def wait_ack(txn_id: int, timeout: float = 30.0) -> bool:
             _ack_events[txn_id] = ev
     return ev.wait(timeout)
 
-# ----- Update handling -----
-
-def simulate_update(sock: socket.socket, server, imei: str, txn_id: int, req: UpdateRequestPacket):
-    try:
-        started = UpdateStatusPacket(imei, txn_id, req.component, 'started', '')
-        encode_and_send(sock, server, 'Update Started', started)
-        try:
-            duration = int(get_config('updateDuration', 5))
-        except Exception:
-            duration = 5
-        time.sleep(max(0, duration))
-        try:
-            failure_rate = float(get_config('updateFailureRate', 0.0))
-        except Exception:
-            failure_rate = 0.0
-        failure_rate = min(1.0, max(0.0, failure_rate))
-        failed = random.random() < failure_rate
-        if failed:
-            final = UpdateStatusPacket(imei, txn_id, req.component, 'failed', 'Simulated failure')
-            encode_and_send(sock, server, 'Update Failed', final)
-        else:
-            final = UpdateStatusPacket(imei, txn_id, req.component, 'success', '')
-            encode_and_send(sock, server, 'Update Success', final)
-    except Exception as ex:
-        try:
-            err = UpdateStatusPacket(imei, txn_id, req.component, 'failed', f'Exception: {ex}')
-            encode_and_send(sock, server, 'Update Failed (exception)', err)
-        except Exception:
-            pass
-
-# ----- Main client -----
+def simulate_update(*args, **kwargs):
+    # Update functionality removed from protocol; no-op
+    return
 
 def main():
     # Load config
@@ -191,17 +160,13 @@ def main():
             except Exception:
                 break
             try:
-                # We expect hex string from the network in zencross, but here assume raw bytes already
-                # Decode header directly from bytes
-                b = data
-                if not b:
+                if not data:
                     continue
-                version = b[0]
-                cmd = (chr(b[1]) + chr(b[2])) if len(b) >= 3 else None
-                txn_id = int.from_bytes(b[3:5], 'big') if len(b) >= 5 else None
-                body = b[5:]
+                packet_hex = data.hex()
+                decoded = PacketDecoder.decode_packet_header(packet_hex)
+                version, cmd, txn_id, body = decoded
                 print("*" * 50)
-                print(f"  Received packet: {b.hex()}")
+                print(f"  Received packet: {packet_hex}")
                 print(f"  Decoded header: version={version}, command={cmd}, txn_id={txn_id}, data={body.hex()}")
                 # Handle ACKs
                 if cmd and cmd[0] == 'A':
@@ -210,30 +175,40 @@ def main():
                     if ev is not None:
                         ev.set()
                     print("  Ack received")
-                elif cmd and cmd[0] == 'C':
+                elif cmd and cmd[0] == 'C' and cmd[1] == 'R':
                     print("  Config request received; sending configuration")
-                    pkt = ConfigPacket(imei, server_address, reporting_interval, reading_interval, txn_id)
-                    encode_and_send(sock, server, 'Requested Configuration', pkt)
-                elif cmd and cmd[0] == 'W':
+                    kv = DataKv({
+                        'server': server_address,
+                        'interval': str(reporting_interval),
+                        'readings': str(reading_interval),
+                    })
+                    tpkt = TelemetryPacket(imei, int(time.time()), txn_id, 'C', kv)
+                    encode_and_send(sock, server, 'Requested Configuration (Telemetry/Kv)', tpkt)
+                elif cmd and cmd[0] == 'C' and cmd[1] == 'W':
                     print("  Write config received; applying")
                     try:
                         decoded = ConfigPacket.decode(imei, txn_id, body)
-                        server_address = decoded.server_address if decoded.server_address else server_address
-                        reporting_interval = decoded.reporting_interval
-                        reading_interval = decoded.reading_interval
+                        cfg = decoded.to_dict()
+                        print(f"  Decoded config: {cfg}")
+                        server_address = cfg.get('server', server_address) or server_address
+                        try:
+                            reporting_interval = int(cfg.get('interval', reporting_interval))
+                        except Exception:
+                            pass
+                        try:
+                            reading_interval = int(cfg.get('readings', reading_interval))
+                        except Exception:
+                            pass
                     except Exception as e:
                         print(f"  Failed to decode W payload: {e}")
                     print(f"  New config: server={server_address}, interval={reporting_interval}, readings={reading_interval}")
-                    pkt = ConfigPacket(imei, server_address, reporting_interval, reading_interval, txn_id)
-                    encode_and_send(sock, server, 'Configuration Updated', pkt)
-                elif cmd and cmd.startswith('U+'):
-                    print("  Update request received")
-                    try:
-                        req = UpdateRequestPacket.decode(imei, txn_id, body)
-                        print(f"  UpdateRequest: component={req.component}, url={req.url}, args={req.arguments}")
-                        Thread(target=simulate_update, args=(sock, server, imei, txn_id, req), daemon=True).start()
-                    except Exception as e:
-                        print(f"  Failed to decode/process UpdateRequest: {e}")
+                    kv = DataKv({
+                        'server': server_address,
+                        'interval': str(reporting_interval),
+                        'readings': str(reading_interval),
+                    })
+                    tpkt = TelemetryPacket(imei, int(time.time()), txn_id, 'C', kv)
+                    encode_and_send(sock, server, 'Write Configuration (Telemetry/Kv)', tpkt)
                 else:
                     print(f"  Unsupported command {cmd}")
                 print("*" * 50)
@@ -259,27 +234,42 @@ def main():
     txn = next_txn()
     software_version = 'generic-udp-1.0.0'
     modem_version = 'generic'
-    power = PowerOnPacket(imei, txn, customer_id, software_version, modem_version, mcc, mnc, rat)
-    send_and_wait('Power On', power)
+    sensors = [
+        DataCustomerId(customer_id),
+        DataVersions(software_version, modem_version),
+        DataNetworkInfo(mcc, mnc, rat),
+    ]
+    startup = TelemetryPacket(imei, int(time.time()), txn, 'P+', sensors)
+    send_and_wait('Startup Telemetry', startup)
 
-    # Send initial C
+    # Send initial configuration via Telemetry (DataKv)
     txn = next_txn()
-    cfg = ConfigPacket(imei, server_address, reporting_interval, reading_interval, txn)
-    send_and_wait('Initial Configuration', cfg)
+    kv = DataKv({
+        'server': server_address,
+        'interval': str(reporting_interval),
+        'readings': str(reading_interval),
+    })
+    cfg_tpkt = TelemetryPacket(imei, int(time.time()), txn, 'C', kv)
+    send_and_wait('Initial Configuration (Telemetry/Kv)', cfg_tpkt)
 
     # Telemetry loop with optional motion
     def make_location():
         loc_type = (get_config('location.type') or 'simulated').lower()
         if loc_type == 'cellid':
             # Use MCC/MNC from config and some fake LAC/Cell
-            return LocationData.cell(mcc, mnc, '1234', '5678', 30)
+            return DataLocation.cell(mcc, mnc, '1234', '5678', 30)
         else:
             lat, lon = sim_loc_move()
-            return LocationData.gnss(lat, lon)
+            return DataLocation.gnss(lat, lon)
 
     def telemetry_once(batch_seconds: int):
         ts = int(time.time())
         loc = make_location()
+        # Publish location (no longer embedded in packets)
+        try:
+            print(f"Published Location: {loc.describe()}")
+        except Exception:
+            print("Published Location: (unavailable)")
         # Fill a SensorDataMulti record bundle
         records = []
         n = max(1, int(batch_seconds / max(1, reading_interval)))
@@ -288,9 +278,9 @@ def main():
             records.append({'temperature': sim_temp(), 'humidity': sim_hum()})
         batt = sim_batt()
         rssi = 30
-        sensor = SensorDataMulti(battery=batt, rssi=rssi, first_timestamp=first_ts, interval=max(1, reading_interval), records=records)
+        sensor = DataMulti(battery=batt, rssi=rssi, first_timestamp=first_ts, interval=max(1, reading_interval), records=records)
         txn = next_txn()
-        pkt = TelemetryPacket(imei, ts, txn, loc, sensor)
+        pkt = TelemetryPacket(imei, ts, txn, 'T', sensor)
         send_and_wait('Telemetry', pkt)
 
     motion_running = False
@@ -301,8 +291,12 @@ def main():
             # send motion start with Null sensor
             ts = int(time.time())
             loc = make_location()
+            try:
+                print(f"Published Location: {loc.describe()}")
+            except Exception:
+                print("Published Location: (unavailable)")
             txn = next_txn()
-            mstart = MotionStartPacket(imei, ts, txn, loc, SensorDataNull())
+            mstart = TelemetryPacket(imei, ts, txn, 'M+', loc)
             send_and_wait('Motion Start', mstart)
             # later send stop
             time.sleep(int(motion_duration))
@@ -310,8 +304,12 @@ def main():
             batt = sim_batt()
             rssi = 30
             loc = make_location()
+            try:
+                print(f"Published Location: {loc.describe()}")
+            except Exception:
+                print("Published Location: (unavailable)")
             txn = next_txn()
-            mstop = MotionStopPacket(imei, int(time.time()), txn, loc, SensorDataSteps(batt, rssi, steps))
+            mstop = TelemetryPacket(imei, int(time.time()), txn, 'M-', [loc, DataSteps(batt, rssi, steps)])
             send_and_wait('Motion Stop', mstop)
             last_motion_end = time.time()
         else:
