@@ -12,7 +12,6 @@ Features (mirrors zencross client, without AT commands):
 Configuration precedence: CLI > YAML > defaults.
 Two sample YAMLs are available in sample_configs/.
 """
-from __future__ import annotations
 import socket
 import time
 import random
@@ -25,8 +24,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'compact-binary-pr
 
 from compact_binary_protocol import (
     DataLocation,
-    DataBasic,
-    DataNull,
+    DataDeviceStatus,
     DataMulti,
     DataSteps,
     DataVersions,
@@ -278,9 +276,9 @@ def main():
             records.append({'temperature': sim_temp(), 'humidity': sim_hum()})
         batt = sim_batt()
         rssi = 30
-        sensor = DataMulti(battery=batt, rssi=rssi, first_timestamp=first_ts, interval=max(1, reading_interval), records=records)
+        sensor = DataMulti(first_timestamp=first_ts, interval=max(1, reading_interval), records=records)
         txn = next_txn()
-        pkt = TelemetryPacket(imei, ts, txn, 'T', sensor)
+        pkt = TelemetryPacket(imei, ts, txn, 'T', [sensor, DataDeviceStatus(battery=batt, rssi=rssi)])
         send_and_wait('Telemetry', pkt)
 
     motion_running = False
@@ -309,7 +307,7 @@ def main():
             except Exception:
                 print("Published Location: (unavailable)")
             txn = next_txn()
-            mstop = TelemetryPacket(imei, int(time.time()), txn, 'M-', [loc, DataSteps(batt, rssi, steps)])
+            mstop = TelemetryPacket(imei, int(time.time()), txn, 'M-', [loc, DataSteps(steps),DataDeviceStatus(batt, rssi)])
             send_and_wait('Motion Stop', mstop)
             last_motion_end = time.time()
         else:
