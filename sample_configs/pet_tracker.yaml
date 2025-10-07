@@ -23,7 +23,7 @@ location:
 interval: 43200
 
 # Reading interval in seconds (sensor sampling)
-readings: 1
+readings: 21600
 
 # Motion event settings (if either is missing, motion events are disabled)
 motionDuration: 120   # seconds between motion start and motion stop

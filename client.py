@@ -278,7 +278,7 @@ def main():
         rssi = 30
         sensor = DataMulti(first_timestamp=first_ts, interval=max(1, reading_interval), records=records)
         txn = next_txn()
-        pkt = TelemetryPacket(imei, ts, txn, 'T', [sensor, DataDeviceStatus(battery=batt, rssi=rssi)])
+        pkt = TelemetryPacket(imei, ts, txn, 'T', [sensor, loc, DataDeviceStatus(battery=batt, rssi=rssi)])
         send_and_wait('Telemetry', pkt)
 
     motion_running = False
